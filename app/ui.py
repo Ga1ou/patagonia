@@ -59,9 +59,14 @@ def _format_money_to_hundred_million(value: Any) -> str:
     return f"{number / 100000000:,.2f} 億"
 
 
+def _calculate_target_price(final_eps: float | None, pe_ratio: float | None) -> float | None:
+    if final_eps is None or pe_ratio is None:
+        return None
+    return final_eps * pe_ratio
+
 class DraggableEpsCanvas(FigureCanvas):
     def __init__(self) -> None:
-        self.figure = Figure(figsize=(7, 3.2), tight_layout=True)
+        self.figure = Figure(figsize=(7, 3.5), tight_layout=True)
         self.ax = self.figure.add_subplot(111)
         super().__init__(self.figure)
 
@@ -87,7 +92,7 @@ class DraggableEpsCanvas(FigureCanvas):
         for value, editable in zip(values, editable_mask):
             current = _to_float(value)
             if current is None and editable:
-                self.values.append(0.0)
+                self.values.append(math.nan)
             elif current is None:
                 self.values.append(math.nan)
             else:
@@ -96,12 +101,26 @@ class DraggableEpsCanvas(FigureCanvas):
         self.drag_index = None
         self._redraw()
 
+    def _rolling_total_eps(self) -> list[float | None]:
+        """每個季度往前取 4 季（含自身）加總，作為 TTM EPS。"""
+        result: list[float | None] = []
+        for i in range(len(self.values)):
+            window = self.values[max(0, i - 3): i + 1]
+            valid = [v for v in window if not math.isnan(v)]
+            if len(valid) == 4:
+                result.append(round(sum(valid), 3))
+            else:
+                result.append(None)
+        return result
+
     def _draw_empty(self) -> None:
         self.ax.clear()
-        self.ax.set_title("EPS Trend (拖拉紅點可調整預估)")
-        self.ax.text(0.5, 0.5, "目前無資料", ha="center", va="center", transform=self.ax.transAxes, fontsize=11)
+        self.ax.set_title("EPS Trend", fontsize=12, fontweight="bold", color="#2b3f5c")
+        self.ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                     transform=self.ax.transAxes, fontsize=11, color="#888")
         self.ax.set_xticks([])
         self.ax.grid(alpha=0.2)
+        self.figure.patch.set_facecolor("#f7fbff")
         self.draw_idle()
 
     def _redraw(self) -> None:
@@ -111,36 +130,72 @@ class DraggableEpsCanvas(FigureCanvas):
             return
 
         x_values = list(range(len(self.quarters)))
-        self.ax.plot(x_values, self.values, color="#1f5d91", linewidth=2.2, alpha=0.85)
+        finite_pairs = [(x, v) for x, v in zip(x_values, self.values) if not math.isnan(v)]
 
-        colors = []
+        # --- Quarterly EPS line ---
+        if finite_pairs:
+            fx, fv = zip(*finite_pairs)
+            self.ax.plot(fx, fv, color="#3a86ff", linewidth=2.0,
+                         alpha=0.85, label="Quarterly EPS", zorder=2)
+
+        # --- Scatter points ---
         for idx, value in enumerate(self.values):
             if math.isnan(value):
-                colors.append("#b8c4d9")
-            elif self.editable_mask[idx]:
-                colors.append("#ef476f")
+                continue
+            if self.editable_mask[idx]:
+                color = "#ef476f"
+                marker = "o"
+                size = 80
             else:
-                colors.append("#3a86ff")
+                color = "#3a86ff"
+                marker = "o"
+                size = 60
+            self.ax.scatter(idx, value, s=size, c=color,
+                            edgecolor="#ffffff", linewidth=1.2, zorder=4, marker=marker)
 
-        self.ax.scatter(x_values, self.values, s=72, c=colors, edgecolor="#ffffff", linewidth=1.2, zorder=3)
+        # --- TTM Total EPS line ---
+        ttm = self._rolling_total_eps()
+        ttm_x = [i for i, v in enumerate(ttm) if v is not None]
+        ttm_y = [v for v in ttm if v is not None]
+        if ttm_x:
+            self.ax.plot(ttm_x, ttm_y, color="#f4a261", linewidth=1.8,
+                         linestyle="--", alpha=0.9, label="TTM EPS (4Q Total)", zorder=3)
+            for x, y in zip(ttm_x, ttm_y):
+                self.ax.scatter(x, y, s=36, c="#f4a261",
+                                edgecolor="#ffffff", linewidth=1.0, zorder=5)
 
-        finite_values = [value for value in self.values if not math.isnan(value)]
-        if not finite_values:
-            finite_values = [0.0]
-        min_val = min(finite_values)
-        max_val = max(finite_values)
-        lower = min_val - 1.2
-        upper = max_val + 1.2
-        if abs(upper - lower) < 0.8:
-            lower -= 0.4
-            upper += 0.4
+        # --- EPS value labels ---
+        for idx, value in enumerate(self.values):
+            if not math.isnan(value):
+                self.ax.annotate(
+                    f"{value:.2f}",
+                    xy=(idx, value),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=8,
+                    color="#2b3f5c",
+                )
 
-        self.ax.set_ylim(lower, upper)
+        # --- Axis & style ---
+        all_values = [v for v in self.values if not math.isnan(v)] + [v for v in ttm_y]
+        if not all_values:
+            all_values = [0.0]
+        min_val = min(all_values)
+        max_val = max(all_values)
+        padding = max(1.5, (max_val - min_val) * 0.2)
+        self.ax.set_ylim(min_val - padding, max_val + padding)
+        self.ax.set_xlim(-0.5, len(self.quarters) - 0.5)
         self.ax.set_xticks(x_values)
-        self.ax.set_xticklabels(self.quarters, rotation=35, ha="right")
-        self.ax.set_title("EPS Trend (紅色點可拖拉)")
-        self.ax.set_ylabel("EPS")
-        self.ax.grid(axis="y", alpha=0.25)
+        self.ax.set_xticklabels(self.quarters, rotation=30, ha="right", fontsize=9)
+        self.ax.set_title("EPS Trend  |  Red = estimated (draggable)", fontsize=11,
+                          fontweight="bold", color="#2b3f5c", pad=10)
+        self.ax.set_ylabel("EPS (NTD)", fontsize=9, color="#44566c")
+        self.ax.grid(axis="y", alpha=0.2, linestyle="--")
+        self.ax.spines[["top", "right"]].set_visible(False)
+        self.ax.legend(loc="upper left", fontsize=8, framealpha=0.6)
+        self.figure.patch.set_facecolor("#f7fbff")
+        self.ax.set_facecolor("#f7fbff")
         self.draw_idle()
 
     def _on_press(self, event: Any) -> None:
@@ -169,7 +224,7 @@ class DraggableEpsCanvas(FigureCanvas):
         if self.drag_index is None or event.inaxes is not self.ax or event.ydata is None:
             return
 
-        value = max(-20.0, min(120.0, float(event.ydata)))
+        value = max(-20.0, min(200.0, float(event.ydata)))
         value = round(value, 3)
         if self.values[self.drag_index] == value:
             return
@@ -293,9 +348,9 @@ class MainWindow(QMainWindow):
         self.log_box.setPlaceholderText("執行記錄會顯示在這裡")
         tab_layout.addWidget(self.log_box, stretch=1)
 
-        self.records_table = QTableWidget(0, 8)
+        self.records_table = QTableWidget(0, 9)
         self.records_table.setHorizontalHeaderLabels(
-            ["公司", "季度", "營收", "淨利", "EPS(公告)", "EPS(預估)", "來源", "更新時間"]
+            ["公司", "季度", "營收", "淨利", "EPS(公告)", "EPS(預估)", "PE(可調)", "來源", "更新時間"]
         )
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.setAlternatingRowColors(True)
@@ -328,14 +383,16 @@ class MainWindow(QMainWindow):
         top_row.addStretch(1)
         tab_layout.addLayout(top_row)
 
-        self.eps_table = QTableWidget(0, 4)
-        self.eps_table.setHorizontalHeaderLabels(["季度", "EPS(公告)", "EPS(預估)", "Final EPS"])
+        self.eps_table = QTableWidget(0, 6)
+        self.eps_table.setHorizontalHeaderLabels(
+            ["季度", "EPS(公告)", "EPS(預估)", "Final EPS", "PE(可調)", "目標價"]
+        )
         self.eps_table.verticalHeader().setVisible(False)
         self.eps_table.setAlternatingRowColors(True)
         self.eps_table.horizontalHeader().setStretchLastSection(True)
         tab_layout.addWidget(self.eps_table, stretch=2)
 
-        hint = QLabel("操作方式: 點擊表格直接輸入 EPS，或拖拉圖中的紅色點來調整。")
+        hint = QLabel("操作方式: 點擊表格可輸入 EPS 與 PE，或拖拉圖中的紅色點調整 EPS。")
         hint.setObjectName("HintLabel")
         tab_layout.addWidget(hint)
 
@@ -538,6 +595,7 @@ class MainWindow(QMainWindow):
                         "net_income": None,
                         "eps_reported": None,
                         "eps_estimated": None,
+                        "pe_ratio": None,
                         "source": "manual_required",
                         "fetched_at": now_text,
                     }
@@ -557,6 +615,8 @@ class MainWindow(QMainWindow):
                 reported = _to_float(record.get("eps_reported"))
                 estimated = _to_float(record.get("eps_estimated"))
                 final_value = reported if reported is not None else estimated
+                pe_ratio = _to_float(record.get("pe_ratio"))
+                target_price = _calculate_target_price(final_value, pe_ratio)
 
                 quarter_item = QTableWidgetItem(quarter)
                 quarter_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -582,6 +642,16 @@ class MainWindow(QMainWindow):
                 final_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.eps_table.setItem(row_idx, 3, final_item)
 
+                pe_item = QTableWidgetItem(_format_number(pe_ratio, 2))
+                pe_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                pe_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.eps_table.setItem(row_idx, 4, pe_item)
+
+                target_item = QTableWidgetItem(_format_number(target_price, 2))
+                target_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                target_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.eps_table.setItem(row_idx, 5, target_item)
+
                 quarters.append(quarter)
                 chart_values.append(final_value)
                 editable_mask.append(reported is None)
@@ -591,7 +661,7 @@ class MainWindow(QMainWindow):
         self.chart.set_series(quarters=quarters, values=chart_values, editable_mask=editable_mask)
 
     def _on_eps_cell_changed(self, row: int, column: int) -> None:
-        if self._loading_eps_table or column != 2:
+        if self._loading_eps_table or column not in (2, 4):
             return
 
         company_id = self.eps_company_combo.currentData()
@@ -599,7 +669,7 @@ class MainWindow(QMainWindow):
             return
 
         quarter_item = self.eps_table.item(row, 0)
-        value_item = self.eps_table.item(row, 2)
+        value_item = self.eps_table.item(row, column)
         if quarter_item is None or value_item is None:
             return
 
@@ -609,26 +679,49 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            eps_value = round(float(text), 3)
+            numeric_value = float(text.replace(",", ""))
         except ValueError:
-            QMessageBox.warning(self, "格式錯誤", "EPS 必須是數字。")
+            metric = "EPS" if column == 2 else "PE"
+            QMessageBox.warning(self, "格式錯誤", f"{metric} 必須是數字。")
             self._load_eps_company(company_id)
             return
 
-        self.collector.update_manual_eps(company_id=company_id, quarter=quarter, eps_value=eps_value)
+        if column == 2:
+            self.collector.update_manual_eps(
+                company_id=company_id,
+                quarter=quarter,
+                eps_value=round(numeric_value, 3),
+            )
+            self._refresh_chart_from_table()
+        else:
+            self.collector.update_manual_pe(
+                company_id=company_id,
+                quarter=quarter,
+                pe_value=round(numeric_value, 3),
+            )
+
         self._update_final_cell_for_row(row)
-        self._refresh_chart_from_table()
+        self._update_target_price_cell_for_row(row)
         self._refresh_collection_table()
         self._refresh_summary_panel()
 
-    def _update_final_cell_for_row(self, row: int) -> None:
+    def _final_eps_from_row(self, row: int) -> float | None:
         reported_item = self.eps_table.item(row, 1)
         estimated_item = self.eps_table.item(row, 2)
-        if reported_item is None or estimated_item is None:
-            return
-        reported = _to_float(reported_item.text().replace(",", ""))
-        estimated = _to_float(estimated_item.text().replace(",", ""))
-        final_value = reported if reported is not None else estimated
+        reported = (
+            _to_float(reported_item.text().replace(",", ""))
+            if reported_item is not None
+            else None
+        )
+        estimated = (
+            _to_float(estimated_item.text().replace(",", ""))
+            if estimated_item is not None
+            else None
+        )
+        return reported if reported is not None else estimated
+
+    def _update_final_cell_for_row(self, row: int) -> None:
+        final_value = self._final_eps_from_row(row)
 
         final_item = self.eps_table.item(row, 3)
         if final_item is None:
@@ -637,6 +730,24 @@ class MainWindow(QMainWindow):
             final_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.eps_table.setItem(row, 3, final_item)
         final_item.setText(_format_number(final_value))
+
+    def _update_target_price_cell_for_row(self, row: int) -> None:
+        final_eps = self._final_eps_from_row(row)
+        pe_item = self.eps_table.item(row, 4)
+        pe_ratio = (
+            _to_float(pe_item.text().replace(",", ""))
+            if pe_item is not None
+            else None
+        )
+        target_price = _calculate_target_price(final_eps, pe_ratio)
+
+        target_item = self.eps_table.item(row, 5)
+        if target_item is None:
+            target_item = QTableWidgetItem()
+            target_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            target_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.eps_table.setItem(row, 5, target_item)
+        target_item.setText(_format_number(target_price, 2))
 
     def _refresh_chart_from_table(self) -> None:
         quarters: list[str] = []
@@ -675,6 +786,7 @@ class MainWindow(QMainWindow):
                     self.eps_table.setItem(row, 2, estimated_item)
                 estimated_item.setText(_format_number(value))
                 self._update_final_cell_for_row(row)
+                self._update_target_price_cell_for_row(row)
             finally:
                 self._loading_eps_table = False
             break
@@ -692,11 +804,31 @@ class MainWindow(QMainWindow):
         company_id = self.eps_company_combo.currentData()
         if not company_id:
             return
+
+        existing_rows = self.db.fetch_company_records(company_id)
+        known_eps_count = sum(
+            1
+            for row in existing_rows
+            if _to_float(row.get("eps_reported")) is not None
+            or _to_float(row.get("eps_estimated")) is not None
+        )
+
         estimates = self.collector.auto_estimate(company_id)
         if estimates:
-            self._append_log(f"{company_id} 自動預估完成，共更新 {len(estimates)} 季。")
+            message = f"{company_id} 自動預估完成，共更新 {len(estimates)} 季。"
+            self._append_log(message)
+            QMessageBox.information(self, "自動預估完成", message)
         else:
-            self._append_log(f"{company_id} 沒有可預估的季度（資料不足或已填值）。")
+            if known_eps_count == 0:
+                message = (
+                    f"{company_id} 目前沒有已知 EPS，請先蒐集財報資料，"
+                    "或先手動輸入至少一季 EPS 再按自動預估。"
+                )
+            else:
+                message = f"{company_id} 沒有可預估的季度（可能都已有值）。"
+            self._append_log(message)
+            QMessageBox.warning(self, "沒有可更新資料", message)
+
         self._load_eps_company(company_id)
         self._refresh_collection_table()
         self._refresh_summary_panel()
@@ -722,13 +854,14 @@ class MainWindow(QMainWindow):
                 _format_money_to_hundred_million(row.get("net_income")),
                 _format_number(row.get("eps_reported")),
                 _format_number(row.get("eps_estimated")),
+                _format_number(row.get("pe_ratio"), 2),
                 row.get("source") or "-",
                 row.get("fetched_at") or "-",
             ]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                if col_idx in (2, 3, 4, 5):
+                if col_idx in (2, 3, 4, 5, 6):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.records_table.setItem(row_idx, col_idx, item)
 
@@ -771,4 +904,3 @@ class MainWindow(QMainWindow):
                 if col_idx in (2, 3):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.latest_table.setItem(row_idx, col_idx, item)
-

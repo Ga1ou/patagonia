@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .quarters import quarter_sort_key, shift_quarter
+from .quarters import parse_quarter, quarter_sort_key, shift_quarter
 
 
 def _to_float(value: Any) -> float | None:
@@ -18,6 +18,27 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _quarter_index(quarter: str) -> int:
+    year, quarter_no = parse_quarter(quarter)
+    return year * 4 + (quarter_no - 1)
+
+
+def _nearest_known_eps(target_quarter: str, final_eps_by_quarter: dict[str, float | None]) -> float | None:
+    target_index = _quarter_index(target_quarter)
+    nearest_value: float | None = None
+    nearest_distance: int | None = None
+
+    for quarter, value in final_eps_by_quarter.items():
+        if value is None:
+            continue
+        distance = abs(_quarter_index(quarter) - target_index)
+        if nearest_distance is None or distance < nearest_distance:
+            nearest_distance = distance
+            nearest_value = float(value)
+
+    return nearest_value
 
 
 def estimate_eps(target_quarter: str, final_eps_by_quarter: dict[str, float | None]) -> float | None:
@@ -53,19 +74,31 @@ def estimate_missing_eps(records: list[dict[str, Any]]) -> dict[str, float]:
     final_eps_by_quarter: dict[str, float | None] = {}
     estimates: dict[str, float] = {}
 
+    # Seed known values first so fallback can use both past and future known quarters.
     for record in ordered:
         quarter = record["quarter"]
         reported = _to_float(record.get("eps_reported"))
         estimated = _to_float(record.get("eps_estimated"))
-        final_eps = reported if reported is not None else estimated
+        final_eps_by_quarter[quarter] = reported if reported is not None else estimated
+
+    known_values = [value for value in final_eps_by_quarter.values() if value is not None]
+    global_mean = _mean([float(value) for value in known_values]) if known_values else None
+
+    for record in ordered:
+        quarter = record["quarter"]
+        final_eps = final_eps_by_quarter.get(quarter)
 
         if final_eps is None:
             predicted = estimate_eps(quarter, final_eps_by_quarter)
+            if predicted is None:
+                predicted = _nearest_known_eps(quarter, final_eps_by_quarter)
+            if predicted is None:
+                predicted = global_mean
             if predicted is not None:
+                predicted = round(float(predicted), 3)
                 estimates[quarter] = predicted
                 final_eps = predicted
 
         final_eps_by_quarter[quarter] = final_eps
 
     return estimates
-

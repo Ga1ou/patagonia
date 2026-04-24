@@ -10,6 +10,7 @@
 - 本地 SQLite 資料庫儲存 (upsert 更新)
 - EPS 管理:
   - 表格點擊輸入
+  - 可調整 PE 欄位，並顯示目標價
   - 圖表拖拉紅色點位調整
   - 一鍵自動預估 (0.5 上季 + 0.3 去年同季 + 0.2 近四季均值)
 - 匯出 CSV
@@ -60,4 +61,3 @@ python main.py
 - V1 使用 Yahoo Finance 作為資料來源，部分欄位可能會有缺值。
 - 若季度資料尚未公開，系統會建立 `manual_required` 佔位資料，供你手動補值。
 - 資料庫路徑: `data/financial_records.db`
-

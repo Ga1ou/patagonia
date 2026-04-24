@@ -70,6 +70,7 @@ class FinancialCollectorService:
                             "net_income": None,
                             "eps_reported": None,
                             "eps_estimated": None,
+                            "pe_ratio": None,
                             "source": "manual_required",
                             "fetched_at": now_text,
                         }
@@ -102,3 +103,5 @@ class FinancialCollectorService:
     def update_manual_eps(self, company_id: str, quarter: str, eps_value: float) -> None:
         self.db.update_estimated_eps(company_id=company_id, quarter=quarter, eps_estimated=eps_value)
 
+    def update_manual_pe(self, company_id: str, quarter: str, pe_value: float) -> None:
+        self.db.update_pe_ratio(company_id=company_id, quarter=quarter, pe_ratio=pe_value)

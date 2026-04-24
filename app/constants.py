@@ -17,12 +17,11 @@ TRACKED_COMPANIES = [
     CompanyProfile(company_id="2454", name="聯發科", yahoo_ticker="2454.TW"),
 ]
 
-DEFAULT_TARGET_QUARTERS = ["2025Q3", "2025Q4", "2026Q1"]
+DEFAULT_TARGET_QUARTERS = ["2025Q1", "2025Q2", "2025Q3", "2025Q4"]
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 EXPORT_DIR = PROJECT_ROOT / "exports"
 DB_PATH = DATA_DIR / "financial_records.db"
 
-APP_TITLE = "Taiwan Financial Console"
-
+APP_TITLE = "Taiwan Financial Console v1.2 (PE)"

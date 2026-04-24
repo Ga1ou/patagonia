@@ -16,6 +16,7 @@ RECORD_COLUMNS = [
     "net_income",
     "eps_reported",
     "eps_estimated",
+    "pe_ratio",
     "source",
     "fetched_at",
 ]
@@ -42,6 +43,7 @@ class Database:
                 net_income REAL,
                 eps_reported REAL,
                 eps_estimated REAL,
+                pe_ratio REAL,
                 source TEXT NOT NULL DEFAULT 'unknown',
                 fetched_at TEXT NOT NULL,
                 PRIMARY KEY (company_id, quarter)
@@ -51,7 +53,17 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_records_quarter ON financial_records(quarter);
             """
         )
+        self._ensure_column("financial_records", "pe_ratio", "REAL")
         self.conn.commit()
+
+    def _ensure_column(self, table_name: str, column_name: str, column_type: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if column_name in existing_columns:
+            return
+        self.conn.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+        )
 
     def upsert_records(self, records: Iterable[dict[str, Any]]) -> int:
         now_text = datetime.now().isoformat(timespec="seconds")
@@ -66,6 +78,7 @@ class Database:
                     record.get("net_income"),
                     record.get("eps_reported"),
                     record.get("eps_estimated"),
+                    record.get("pe_ratio"),
                     record.get("source", "unknown"),
                     record.get("fetched_at", now_text),
                 )
@@ -83,16 +96,18 @@ class Database:
                 net_income,
                 eps_reported,
                 eps_estimated,
+                pe_ratio,
                 source,
                 fetched_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, quarter) DO UPDATE SET
                 company_name=excluded.company_name,
                 revenue=excluded.revenue,
                 net_income=excluded.net_income,
                 eps_reported=excluded.eps_reported,
                 eps_estimated=COALESCE(financial_records.eps_estimated, excluded.eps_estimated),
+                pe_ratio=COALESCE(excluded.pe_ratio, financial_records.pe_ratio),
                 source=excluded.source,
                 fetched_at=excluded.fetched_at;
             """,
@@ -156,6 +171,27 @@ class Database:
             )
         self.conn.commit()
 
+    def update_pe_ratio(self, company_id: str, quarter: str, pe_ratio: float) -> None:
+        now_text = datetime.now().isoformat(timespec="seconds")
+        cursor = self.conn.execute(
+            """
+            UPDATE financial_records
+            SET pe_ratio = ?, fetched_at = ?
+            WHERE company_id = ? AND quarter = ?
+            """,
+            (pe_ratio, now_text, company_id, quarter),
+        )
+        if cursor.rowcount == 0:
+            self.conn.execute(
+                """
+                INSERT INTO financial_records (
+                    company_id, company_name, quarter, source, fetched_at, pe_ratio
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (company_id, company_id, quarter, "manual_input", now_text, pe_ratio),
+            )
+        self.conn.commit()
+
     def export_csv(
         self,
         export_path: str | Path,
@@ -182,4 +218,3 @@ class Database:
 
     def close(self) -> None:
         self.conn.close()
-

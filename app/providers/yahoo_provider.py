@@ -25,11 +25,18 @@ class YahooFinanceProvider(DataProvider):
         "Net Income Including Noncontrolling Interests",
     ]
 
+    # 台股 Basic EPS 欄位名稱（yfinance 有時用不同 key）
+    EPS_KEYS = [
+        "Basic EPS",
+        "Diluted EPS",
+        "EPS",
+    ]
+
     def fetch_financials(self, profile: CompanyProfile) -> list[dict]:
         ticker = yf.Ticker(profile.yahoo_ticker)
 
         income_stmt = self._safe_quarterly_income_stmt(ticker)
-        eps_by_quarter = self._safe_eps_map(ticker)
+        shares_outstanding = self._safe_shares_outstanding(ticker)
 
         by_quarter: dict[str, dict[str, Any]] = {}
         source_name = "yahoo_finance"
@@ -41,30 +48,25 @@ class YahooFinanceProvider(DataProvider):
                 if quarter is None:
                     continue
 
-                by_quarter[quarter] = {
-                    "company_id": profile.company_id,
-                    "company_name": profile.name,
-                    "quarter": quarter,
-                    "revenue": self._extract_metric(income_stmt, self.REVENUE_KEYS, column),
-                    "net_income": self._extract_metric(income_stmt, self.NET_INCOME_KEYS, column),
-                    "eps_reported": None,
-                    "eps_estimated": None,
-                    "source": source_name,
-                    "fetched_at": now_text,
-                }
+                revenue = self._extract_metric(income_stmt, self.REVENUE_KEYS, column)
+                net_income = self._extract_metric(income_stmt, self.NET_INCOME_KEYS, column)
 
-        for quarter, eps in eps_by_quarter.items():
-            if quarter in by_quarter:
-                by_quarter[quarter]["eps_reported"] = eps
-            else:
+                # 優先從 income_stmt 讀 Basic EPS
+                eps_reported = self._extract_metric(income_stmt, self.EPS_KEYS, column)
+
+                # Fallback：淨利 ÷ 股數（台股單位：元/股）
+                if eps_reported is None and net_income is not None and shares_outstanding:
+                    eps_reported = round(net_income / shares_outstanding, 2)
+
                 by_quarter[quarter] = {
                     "company_id": profile.company_id,
                     "company_name": profile.name,
                     "quarter": quarter,
-                    "revenue": None,
-                    "net_income": None,
-                    "eps_reported": eps,
+                    "revenue": revenue,
+                    "net_income": net_income,
+                    "eps_reported": eps_reported,
                     "eps_estimated": None,
+                    "pe_ratio": None,
                     "source": source_name,
                     "fetched_at": now_text,
                 }
@@ -82,28 +84,28 @@ class YahooFinanceProvider(DataProvider):
         except Exception:
             return None
 
-    def _safe_eps_map(self, ticker: yf.Ticker) -> dict[str, float]:
-        eps_by_quarter: dict[str, float] = {}
+    def _safe_shares_outstanding(self, ticker: yf.Ticker) -> float | None:
+        """
+        抓流通股數，用於 EPS fallback 計算。
+        優先用 info['sharesOutstanding']，再試 fast_info。
+        台股單位是「股」，需除以 1 (yfinance 回傳已是股數)。
+        """
         try:
-            earnings_dates = ticker.get_earnings_dates(limit=20)
+            info = ticker.info or {}
+            shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            if shares:
+                return float(shares)
         except Exception:
-            earnings_dates = None
+            pass
 
-        if isinstance(earnings_dates, pd.DataFrame) and not earnings_dates.empty:
-            for index, row in earnings_dates.iterrows():
-                report_date = self._index_to_date(index)
-                if report_date is None:
-                    continue
-                quarter = latest_completed_quarter(report_date)
-                eps = self._to_float(
-                    row.get("Reported EPS")
-                    if "Reported EPS" in row
-                    else row.get("EPS Actual")
-                )
-                if eps is not None and quarter not in eps_by_quarter:
-                    eps_by_quarter[quarter] = eps
+        try:
+            shares = ticker.fast_info.get("shares")
+            if shares:
+                return float(shares)
+        except Exception:
+            pass
 
-        return eps_by_quarter
+        return None
 
     def _column_to_quarter(self, column: Any) -> str | None:
         if isinstance(column, pd.Timestamp):
@@ -123,34 +125,25 @@ class YahooFinanceProvider(DataProvider):
     def _extract_metric(self, df: pd.DataFrame, keys: list[str], column: Any) -> float | None:
         for key in keys:
             if key in df.index:
-                return self._to_float(df.at[key, column])
+                val = self._to_float(df.at[key, column])
+                if val is not None:
+                    return val
 
-        lowered = {str(index).lower(): index for index in df.index}
+        lowered = {str(idx).lower(): idx for idx in df.index}
         for key in keys:
             candidate = lowered.get(key.lower())
             if candidate is not None:
-                return self._to_float(df.at[candidate, column])
-        return None
+                val = self._to_float(df.at[candidate, column])
+                if val is not None:
+                    return val
 
-    def _index_to_date(self, index: Any) -> date | None:
-        if isinstance(index, pd.Timestamp):
-            return index.date()
-        if isinstance(index, datetime):
-            return index.date()
-        if isinstance(index, date):
-            return index
-        if isinstance(index, str):
-            try:
-                return pd.to_datetime(index).date()
-            except Exception:
-                return None
         return None
 
     def _to_float(self, value: Any) -> float | None:
         if value is None:
             return None
         try:
-            return float(value)
+            f = float(value)
+            return None if pd.isna(f) else f
         except (TypeError, ValueError):
             return None
-
